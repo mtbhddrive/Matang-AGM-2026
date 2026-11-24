@@ -4,13 +4,15 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#1B3678" />
-  <title>Matang Berhad AGM Voucher Scanner</title>
+  <title>Matang Berhad AGM Voucher Scanner (Live Sync)</title>
   <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
+  <!-- Firebase App & Realtime Database SDK -->
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
   <style>
     :root {
       --navy: #1B3678;
       --navy-dark: #102352;
-      --gold: #EAB308;
       --bg: #F1F5F9;
       --card: #FFFFFF;
       --text: #0F172A;
@@ -41,6 +43,17 @@
     }
     header h1 { margin: 0; font-size: 17px; font-weight: 700; }
     header p { margin: 3px 0 0; font-size: 12px; color: #CBD5E1; }
+    .sync-badge {
+      display: inline-block;
+      margin-top: 5px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      background: rgba(255,255,255,0.16);
+      color: #FEF08A;
+    }
+    .sync-badge.online { background: #15803D; color: #fff; }
     .container { max-width: 640px; margin: 12px auto; padding: 0 12px; }
     .stats {
       display: grid;
@@ -125,14 +138,15 @@
     .badge-ok { background: var(--ok-bg); color: var(--ok-fg); padding: 2px 7px; border-radius: 999px; font-weight: 700; }
     .badge-no { background: #F1F5F9; color: var(--muted); padding: 2px 7px; border-radius: 999px; font-weight: 600; }
     .list-wrap { max-height: 360px; overflow-y: auto; }
-    .note-row { margin-top: 8px; }
+    .note-row { margin-top: 8px; display: flex; gap: 8px; }
     .note-row input { width: 100%; }
   </style>
 </head>
 <body>
   <header>
     <h1>Matang Berhad — AGM Door Gift Scanner</h1>
-    <p>120 Vouchers (AGM2026-0001 ~ AGM2026-0120) · Duplicate Check · Local Auto-Save</p>
+    <p>120 Vouchers (AGM2026-0001 ~ AGM2026-0120) · Multi-Device Duplicate Lock</p>
+    <div id="syncStatus" class="sync-badge">Connecting to Cloud Sync...</div>
   </header>
 
   <div class="container">
@@ -163,7 +177,8 @@
       </div>
 
       <div class="note-row">
-        <input type="text" id="recipientInput" placeholder="Optional: Shareholder / Recipient Name or Remark" />
+        <input type="text" id="staffInput" placeholder="Counter / Staff Name (e.g. Counter 1)" style="max-width: 175px;" onchange="saveStaffName()" />
+        <input type="text" id="recipientInput" placeholder="Optional: Shareholder Name / Remark" />
       </div>
 
       <div class="manual-box">
@@ -186,7 +201,7 @@
               <th>Serial No.</th>
               <th>Status</th>
               <th>Time</th>
-              <th>Recipient / Note</th>
+              <th>Staff / Note</th>
             </tr>
           </thead>
           <tbody id="voucherTableBody"></tbody>
@@ -196,9 +211,14 @@
   </div>
 
   <script>
-    const STORAGE_KEY = "matang_agm_2026_vouchers_120";
+    const FIREBASE_DB_URL = "https://matang-agm-2026-default-rtdb.asia-southeast1.firebasedatabase.app";
+
+    const STORAGE_KEY = "matang_agm_2026_vouchers_120_cache";
+    const STAFF_KEY = "matang_agm_2026_staff_name";
     const TOTAL_COUNT = 120;
     let vouchers = {};
+    let dbRef = null;
+    let isCloudReady = false;
     let codeReader = null;
     let isScanning = false;
     let activeStream = null;
@@ -216,32 +236,77 @@
           serial: code,
           redeemed: false,
           redeemedAt: "",
+          staff: "",
           note: ""
         };
       }
       return map;
     }
 
-    function loadState() {
+    function loadLocalCache() {
       try {
+        const savedStaff = localStorage.getItem(STAFF_KEY);
+        if (savedStaff) document.getElementById("staffInput").value = savedStaff;
         const raw = localStorage.getItem(STORAGE_KEY);
+        const def = buildDefaultVouchers();
         if (raw) {
           const parsed = JSON.parse(raw);
-          const def = buildDefaultVouchers();
           for (const k of Object.keys(def)) {
             if (parsed[k]) def[k] = { ...def[k], ...parsed[k] };
           }
-          vouchers = def;
-          return;
         }
-      } catch (e) {}
-      vouchers = buildDefaultVouchers();
+        vouchers = def;
+      } catch (e) {
+        vouchers = buildDefaultVouchers();
+      }
     }
 
-    function saveState() {
+    function saveLocalCache() {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(vouchers));
       } catch (e) {}
+    }
+
+    function saveStaffName() {
+      try {
+        localStorage.setItem(STAFF_KEY, document.getElementById("staffInput").value.trim());
+      } catch (e) {}
+    }
+
+    function initCloudSync() {
+      const badge = document.getElementById("syncStatus");
+      try {
+        firebase.initializeApp({ databaseURL: FIREBASE_DB_URL });
+        const db = firebase.database();
+        dbRef = db.ref("agm2026/vouchers");
+
+        db.ref(".info/connected").on("value", (snap) => {
+          if (snap.val() === true) {
+            isCloudReady = true;
+            badge.textContent = "🟢 Live Multi-Device Sync Active";
+            badge.classList.add("online");
+          } else {
+            isCloudReady = false;
+            badge.textContent = "🟠 Reconnecting to Cloud Sync...";
+            badge.classList.remove("online");
+          }
+        });
+
+        dbRef.on("value", (snapshot) => {
+          const remote = snapshot.val() || {};
+          const merged = buildDefaultVouchers();
+          for (const k of Object.keys(merged)) {
+            if (remote[k] && remote[k].redeemed) {
+              merged[k] = { ...merged[k], ...remote[k] };
+            }
+          }
+          vouchers = merged;
+          saveLocalCache();
+          renderTable();
+        });
+      } catch (err) {
+        badge.textContent = "⚠️ Cloud Sync Error: " + (err.message || err);
+      }
     }
 
     function normalizeSerial(rawInput) {
@@ -267,7 +332,6 @@
           const Ctx = window.AudioContext || window.webkitAudioContext;
           if (!Ctx) return;
           audioCtx = new Ctx();
-          // Boost & level loud beeps cleanly without clipping
           const compressor = audioCtx.createDynamicsCompressor();
           compressor.threshold.setValueAtTime(-12, audioCtx.currentTime);
           compressor.knee.setValueAtTime(18, audioCtx.currentTime);
@@ -277,7 +341,6 @@
 
           audioMaster = audioCtx.createGain();
           audioMaster.gain.setValueAtTime(1.8, audioCtx.currentTime);
-
           audioMaster.connect(compressor);
           compressor.connect(audioCtx.destination);
         }
@@ -307,19 +370,16 @@
       } catch (e) {}
     }
 
-    // 2 quick loud beeps on successful scan
     function playSuccessSound() {
       playTone(1046.5, 0.00, 0.075, "square", 0.55);
       playTone(1318.5, 0.12, 0.075, "square", 0.55);
     }
 
-    // Long loud decline beeps when already redeemed
     function playDeclineSound() {
       playTone(220, 0.00, 0.42, "sawtooth", 0.75);
       playTone(190, 0.50, 0.48, "sawtooth", 0.75);
     }
 
-    // Short tone for invalid/unknown code
     function playUnknownSound() {
       playTone(380, 0.00, 0.16, "triangle", 0.45);
       playTone(300, 0.20, 0.18, "triangle", 0.45);
@@ -331,9 +391,16 @@
       el.textContent = text;
     }
 
-    function processSerial(rawCode) {
+    function formatClaimDetail(item) {
+      const who = item.staff ? ` by ${item.staff}` : "";
+      const remark = item.note ? ` (${item.note})` : "";
+      return `${item.redeemedAt}${who}${remark}`;
+    }
+
+    async function processSerial(rawCode) {
       ensureAudioContext();
       const serial = normalizeSerial(rawCode);
+      const staffVal = document.getElementById("staffInput").value.trim();
       const noteVal = document.getElementById("recipientInput").value.trim();
 
       if (!serial || !vouchers[serial]) {
@@ -342,32 +409,65 @@
         return;
       }
 
-      const item = vouchers[serial];
-      if (item.redeemed) {
-        showBanner("err", `⚠️ DECLINED (ALREADY REDEEMED): ${serial} was claimed at ${item.redeemedAt}${item.note ? " (" + item.note + ")" : ""}!`);
+      if (vouchers[serial].redeemed) {
+        showBanner("err", `⚠️ DECLINED (ALREADY REDEEMED): ${serial} was claimed at ${formatClaimDetail(vouchers[serial])}!`);
         playDeclineSound();
         if (navigator.vibrate) navigator.vibrate([300, 120, 350]);
-        renderTable();
         return;
       }
 
       const nowStr = new Date().toLocaleString();
-      item.redeemed = true;
-      item.redeemedAt = nowStr;
-      if (noteVal) item.note = noteVal;
 
-      saveState();
+      if (dbRef) {
+        try {
+          const itemRef = dbRef.child(serial);
+          const txResult = await itemRef.transaction((currentData) => {
+            if (currentData && currentData.redeemed) {
+              return;
+            }
+            return {
+              no: vouchers[serial].no,
+              serial: serial,
+              redeemed: true,
+              redeemedAt: nowStr,
+              staff: staffVal,
+              note: noteVal
+            };
+          });
+
+          if (!txResult.committed) {
+            const existing = txResult.snapshot.val() || vouchers[serial];
+            showBanner("err", `⚠️ DECLINED (ALREADY REDEEMED): ${serial} was claimed at ${formatClaimDetail(existing)}!`);
+            playDeclineSound();
+            if (navigator.vibrate) navigator.vibrate([300, 120, 350]);
+            return;
+          }
+
+          showBanner("ok", `✅ REDEEMED: ${serial} at ${nowStr}${staffVal ? " · " + staffVal : ""}${noteVal ? " · " + noteVal : ""}`);
+          playSuccessSound();
+          if (navigator.vibrate) navigator.vibrate(110);
+          document.getElementById("serialInput").value = "";
+          document.getElementById("recipientInput").value = "";
+          return;
+        } catch (err) {
+          showBanner("warn", `Network sync warning (${err.message || err}). Falling back to local record.`);
+        }
+      }
+
+      vouchers[serial].redeemed = true;
+      vouchers[serial].redeemedAt = nowStr;
+      vouchers[serial].staff = staffVal;
+      vouchers[serial].note = noteVal;
+      saveLocalCache();
       renderTable();
-      showBanner("ok", `✅ REDEEMED: ${serial} at ${nowStr}${item.note ? " · " + item.note : ""}`);
+      showBanner("ok", `✅ REDEEMED (LOCAL): ${serial} at ${nowStr}`);
       playSuccessSound();
-      if (navigator.vibrate) navigator.vibrate(110);
       document.getElementById("serialInput").value = "";
       document.getElementById("recipientInput").value = "";
     }
 
     function handleRedeem() {
-      const val = document.getElementById("serialInput").value;
-      processSerial(val);
+      processSerial(document.getElementById("serialInput").value);
     }
 
     async function applyFocusConstraints(stream) {
@@ -379,9 +479,7 @@
         if (caps.focusMode && Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
           adv.push({ focusMode: "continuous" });
         }
-        if (adv.length > 0) {
-          await track.applyConstraints({ advanced: adv });
-        }
+        if (adv.length > 0) await track.applyConstraints({ advanced: adv });
       } catch (e) {}
     }
 
@@ -406,31 +504,27 @@
       ensureAudioContext();
       try {
         if (!window.ZXing || !window.ZXing.BrowserMultiFormatReader) {
-          showBanner("warn", "Camera barcode library could not load (check internet/HTTPS). You can still enter serial numbers manually.");
+          showBanner("warn", "Camera barcode library could not load. Use manual entry below.");
           return;
         }
-        if (!codeReader) {
-          codeReader = new window.ZXing.BrowserMultiFormatReader();
-        }
+        if (!codeReader) codeReader = new window.ZXing.BrowserMultiFormatReader();
         document.getElementById("camWrapper").style.display = "block";
         document.getElementById("btnStartCam").style.display = "none";
         document.getElementById("btnStopCam").style.display = "inline-block";
         isScanning = true;
 
-        const constraints = {
-          audio: false,
-          video: {
-            facingMode: { ideal: "environment" },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            focusMode: { ideal: "continuous" }
-          }
-        };
-
         await codeReader.decodeFromConstraints(
-          constraints,
+          {
+            audio: false,
+            video: {
+              facingMode: { ideal: "environment" },
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              focusMode: { ideal: "continuous" }
+            }
+          },
           "videoPreview",
-          (result, err) => {
+          (result) => {
             const videoEl = document.getElementById("videoPreview");
             if (videoEl && videoEl.srcObject && videoEl.srcObject !== activeStream) {
               activeStream = videoEl.srcObject;
@@ -451,7 +545,7 @@
         document.getElementById("camWrapper").style.display = "none";
         document.getElementById("btnStartCam").style.display = "inline-block";
         document.getElementById("btnStopCam").style.display = "none";
-        showBanner("warn", `Camera access failed (${err.message || err}). Ensure HTTPS/camera permission is allowed, or use manual entry below.`);
+        showBanner("warn", `Camera access failed (${err.message || err}). Ensure HTTPS/camera permission is allowed.`);
       }
     }
 
@@ -475,14 +569,17 @@
 
       const ordered = [...list.filter(x => x.redeemed).reverse(), ...list.filter(x => !x.redeemed)];
       const tbody = document.getElementById("voucherTableBody");
-      tbody.innerHTML = ordered.map(item => `
-        <tr>
-          <td><strong>${item.serial}</strong></td>
-          <td>${item.redeemed ? '<span class="badge-ok">Redeemed</span>' : '<span class="badge-no">Pending</span>'}</td>
-          <td>${item.redeemedAt || "-"}</td>
-          <td>${escapeHtml(item.note || "")}</td>
-        </tr>
-      `).join("");
+      tbody.innerHTML = ordered.map(item => {
+        const info = [item.staff, item.note].filter(Boolean).join(" · ");
+        return `
+          <tr>
+            <td><strong>${item.serial}</strong></td>
+            <td>${item.redeemed ? '<span class="badge-ok">Redeemed</span>' : '<span class="badge-no">Pending</span>'}</td>
+            <td>${item.redeemedAt || "-"}</td>
+            <td>${escapeHtml(info)}</td>
+          </tr>
+        `;
+      }).join("");
     }
 
     function escapeHtml(str) {
@@ -491,13 +588,14 @@
 
     function exportCSV() {
       const list = Object.values(vouchers).sort((a, b) => a.no - b.no);
-      const rows = [["No.", "Voucher Serial No.", "Status", "Redeemed Time", "Recipient / Note"]];
+      const rows = [["No.", "Voucher Serial No.", "Status", "Redeemed Time", "Counter / Staff", "Recipient / Note"]];
       for (const item of list) {
         rows.push([
           item.no,
           item.serial,
           item.redeemed ? "Redeemed" : "Unissued",
           item.redeemedAt || "",
+          item.staff || "",
           item.note || ""
         ]);
       }
@@ -511,16 +609,20 @@
       URL.revokeObjectURL(url);
     }
 
-    function resetAll() {
-      if (!confirm("Reset all 120 vouchers back to unredeemed?")) return;
+    async function resetAll() {
+      if (!confirm("Reset ALL 120 vouchers across ALL synced phones back to unredeemed?")) return;
+      if (dbRef) {
+        await dbRef.remove();
+      }
       vouchers = buildDefaultVouchers();
-      saveState();
+      saveLocalCache();
       renderTable();
       showBanner("warn", "All 120 vouchers have been reset.");
     }
 
-    loadState();
+    loadLocalCache();
     renderTable();
+    initCloudSync();
   </script>
 </body>
 </html>
