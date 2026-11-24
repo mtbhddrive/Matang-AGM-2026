@@ -203,6 +203,7 @@
     let isScanning = false;
     let activeStream = null;
     let audioCtx = null;
+    let audioMaster = null;
     let lastScannedCode = "";
     let lastScanTime = 0;
 
@@ -264,7 +265,21 @@
       try {
         if (!audioCtx) {
           const Ctx = window.AudioContext || window.webkitAudioContext;
-          if (Ctx) audioCtx = new Ctx();
+          if (!Ctx) return;
+          audioCtx = new Ctx();
+          // Boost & level loud beeps cleanly without clipping
+          const compressor = audioCtx.createDynamicsCompressor();
+          compressor.threshold.setValueAtTime(-12, audioCtx.currentTime);
+          compressor.knee.setValueAtTime(18, audioCtx.currentTime);
+          compressor.ratio.setValueAtTime(8, audioCtx.currentTime);
+          compressor.attack.setValueAtTime(0.003, audioCtx.currentTime);
+          compressor.release.setValueAtTime(0.15, audioCtx.currentTime);
+
+          audioMaster = audioCtx.createGain();
+          audioMaster.gain.setValueAtTime(1.8, audioCtx.currentTime);
+
+          audioMaster.connect(compressor);
+          compressor.connect(audioCtx.destination);
         }
         if (audioCtx && audioCtx.state === "suspended") {
           audioCtx.resume();
@@ -272,38 +287,42 @@
       } catch (e) {}
     }
 
-    function playTone(freq, startOffsetSec, durationSec, type = "sine", volume = 0.18) {
+    function playTone(freq, startOffsetSec, durationSec, type = "square", volume = 0.55) {
       try {
         ensureAudioContext();
-        if (!audioCtx) return;
+        if (!audioCtx || !audioMaster) return;
         const now = audioCtx.currentTime + startOffsetSec;
         const osc = audioCtx.createOscillator();
         const gain = audioCtx.createGain();
         osc.type = type;
         osc.frequency.setValueAtTime(freq, now);
         gain.gain.setValueAtTime(0.001, now);
-        gain.gain.exponentialRampToValueAtTime(volume, now + 0.015);
+        gain.gain.linearRampToValueAtTime(volume, now + 0.008);
+        gain.gain.setValueAtTime(volume, now + Math.max(0.01, durationSec - 0.015));
         gain.gain.exponentialRampToValueAtTime(0.001, now + durationSec);
         osc.connect(gain);
-        gain.connect(audioCtx.destination);
+        gain.connect(audioMaster);
         osc.start(now);
         osc.stop(now + durationSec + 0.02);
       } catch (e) {}
     }
 
+    // 2 quick loud beeps on successful scan
     function playSuccessSound() {
-      playTone(880, 0, 0.11, "sine", 0.2);
-      playTone(1174.66, 0.11, 0.16, "sine", 0.22);
+      playTone(1046.5, 0.00, 0.075, "square", 0.55);
+      playTone(1318.5, 0.12, 0.075, "square", 0.55);
     }
 
+    // Long loud decline beeps when already redeemed
     function playDeclineSound() {
-      playTone(230, 0, 0.18, "sawtooth", 0.22);
-      playTone(185, 0.21, 0.24, "sawtooth", 0.24);
+      playTone(220, 0.00, 0.42, "sawtooth", 0.75);
+      playTone(190, 0.50, 0.48, "sawtooth", 0.75);
     }
 
+    // Short tone for invalid/unknown code
     function playUnknownSound() {
-      playTone(360, 0, 0.14, "triangle", 0.16);
-      playTone(300, 0.16, 0.16, "triangle", 0.16);
+      playTone(380, 0.00, 0.16, "triangle", 0.45);
+      playTone(300, 0.20, 0.18, "triangle", 0.45);
     }
 
     function showBanner(type, text) {
@@ -327,7 +346,7 @@
       if (item.redeemed) {
         showBanner("err", `⚠️ DECLINED (ALREADY REDEEMED): ${serial} was claimed at ${item.redeemedAt}${item.note ? " (" + item.note + ")" : ""}!`);
         playDeclineSound();
-        if (navigator.vibrate) navigator.vibrate([220, 90, 220]);
+        if (navigator.vibrate) navigator.vibrate([300, 120, 350]);
         renderTable();
         return;
       }
