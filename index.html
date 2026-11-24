@@ -77,14 +77,24 @@
     .btn-danger { background: #DC2626; color: #fff; }
     .btn-success { background: #15803D; color: #fff; }
     .btn-outline { background: #E2E8F0; color: var(--text); }
-    video {
-      width: 100%;
-      max-height: 260px;
-      border-radius: 10px;
-      background: #000;
+    .cam-wrapper {
+      position: relative;
       margin-top: 10px;
       display: none;
+    }
+    video {
+      width: 100%;
+      max-height: 280px;
+      border-radius: 10px;
+      background: #000;
+      display: block;
       object-fit: cover;
+    }
+    .focus-tip {
+      margin-top: 6px;
+      font-size: 12px;
+      color: var(--muted);
+      text-align: center;
     }
     .manual-box {
       display: flex;
@@ -111,7 +121,7 @@
     .banner.warn { display: block; background: var(--warn-bg); color: var(--warn-fg); border: 1px solid #FDE047; }
     table { width: 100%; border-collapse: collapse; font-size: 12px; }
     th, td { padding: 8px 6px; border-bottom: 1px solid #E2E8F0; text-align: left; }
-    th { background: #F8FAFC; color: var(--muted); font-weight: 700; position: sticky; top: 56px; }
+    th { background: #F8FAFC; color: var(--muted); font-weight: 700; }
     .badge-ok { background: var(--ok-bg); color: var(--ok-fg); padding: 2px 7px; border-radius: 999px; font-weight: 700; }
     .badge-no { background: #F1F5F9; color: var(--muted); padding: 2px 7px; border-radius: 999px; font-weight: 600; }
     .list-wrap { max-height: 360px; overflow-y: auto; }
@@ -146,7 +156,11 @@
         <button class="btn-primary" id="btnStartCam" onclick="startScanner()">Start Camera Scan</button>
         <button class="btn-danger" id="btnStopCam" onclick="stopScanner()" style="display:none;">Stop Camera</button>
       </div>
-      <video id="videoPreview" playsinline muted></video>
+
+      <div class="cam-wrapper" id="camWrapper" onclick="triggerRefocus()">
+        <video id="videoPreview" playsinline muted></video>
+        <div class="focus-tip">Hold barcode ~12–18 cm away · Tap camera view to refocus</div>
+      </div>
 
       <div class="note-row">
         <input type="text" id="recipientInput" placeholder="Optional: Shareholder / Recipient Name or Remark" />
@@ -187,6 +201,8 @@
     let vouchers = {};
     let codeReader = null;
     let isScanning = false;
+    let activeStream = null;
+    let audioCtx = null;
     let lastScannedCode = "";
     let lastScanTime = 0;
 
@@ -244,19 +260,50 @@
       return cleaned;
     }
 
-    function beep(freq = 880, duration = 140) {
+    function ensureAudioContext() {
       try {
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = "sine";
-        osc.frequency.value = freq;
-        gain.gain.value = 0.12;
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start();
-        setTimeout(() => { osc.stop(); ctx.close(); }, duration);
+        if (!audioCtx) {
+          const Ctx = window.AudioContext || window.webkitAudioContext;
+          if (Ctx) audioCtx = new Ctx();
+        }
+        if (audioCtx && audioCtx.state === "suspended") {
+          audioCtx.resume();
+        }
       } catch (e) {}
+    }
+
+    function playTone(freq, startOffsetSec, durationSec, type = "sine", volume = 0.18) {
+      try {
+        ensureAudioContext();
+        if (!audioCtx) return;
+        const now = audioCtx.currentTime + startOffsetSec;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, now);
+        gain.gain.setValueAtTime(0.001, now);
+        gain.gain.exponentialRampToValueAtTime(volume, now + 0.015);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + durationSec);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(now);
+        osc.stop(now + durationSec + 0.02);
+      } catch (e) {}
+    }
+
+    function playSuccessSound() {
+      playTone(880, 0, 0.11, "sine", 0.2);
+      playTone(1174.66, 0.11, 0.16, "sine", 0.22);
+    }
+
+    function playDeclineSound() {
+      playTone(230, 0, 0.18, "sawtooth", 0.22);
+      playTone(185, 0.21, 0.24, "sawtooth", 0.24);
+    }
+
+    function playUnknownSound() {
+      playTone(360, 0, 0.14, "triangle", 0.16);
+      playTone(300, 0.16, 0.16, "triangle", 0.16);
     }
 
     function showBanner(type, text) {
@@ -266,21 +313,21 @@
     }
 
     function processSerial(rawCode) {
+      ensureAudioContext();
       const serial = normalizeSerial(rawCode);
       const noteVal = document.getElementById("recipientInput").value.trim();
 
       if (!serial || !vouchers[serial]) {
         showBanner("warn", `Invalid / Unknown Serial: "${rawCode}". Valid range: AGM2026-0001 to AGM2026-0120.`);
-        beep(320, 220);
+        playUnknownSound();
         return;
       }
 
       const item = vouchers[serial];
       if (item.redeemed) {
-        showBanner("err", `⚠️ ALREADY REDEEMED: ${serial} was claimed at ${item.redeemedAt}${item.note ? " (" + item.note + ")" : ""}!`);
-        beep(240, 180);
-        setTimeout(() => beep(240, 180), 210);
-        if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+        showBanner("err", `⚠️ DECLINED (ALREADY REDEEMED): ${serial} was claimed at ${item.redeemedAt}${item.note ? " (" + item.note + ")" : ""}!`);
+        playDeclineSound();
+        if (navigator.vibrate) navigator.vibrate([220, 90, 220]);
         renderTable();
         return;
       }
@@ -293,8 +340,8 @@
       saveState();
       renderTable();
       showBanner("ok", `✅ REDEEMED: ${serial} at ${nowStr}${item.note ? " · " + item.note : ""}`);
-      beep(920, 130);
-      if (navigator.vibrate) navigator.vibrate(120);
+      playSuccessSound();
+      if (navigator.vibrate) navigator.vibrate(110);
       document.getElementById("serialInput").value = "";
       document.getElementById("recipientInput").value = "";
     }
@@ -304,8 +351,40 @@
       processSerial(val);
     }
 
+    async function applyFocusConstraints(stream) {
+      try {
+        const track = stream && stream.getVideoTracks && stream.getVideoTracks()[0];
+        if (!track || !track.applyConstraints) return;
+        const caps = track.getCapabilities ? track.getCapabilities() : {};
+        const adv = [];
+        if (caps.focusMode && Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
+          adv.push({ focusMode: "continuous" });
+        }
+        if (adv.length > 0) {
+          await track.applyConstraints({ advanced: adv });
+        }
+      } catch (e) {}
+    }
+
+    async function triggerRefocus() {
+      try {
+        const track = activeStream && activeStream.getVideoTracks && activeStream.getVideoTracks()[0];
+        if (!track || !track.applyConstraints) return;
+        const caps = track.getCapabilities ? track.getCapabilities() : {};
+        if (caps.focusMode && Array.isArray(caps.focusMode)) {
+          if (caps.focusMode.includes("single-shot")) {
+            await track.applyConstraints({ advanced: [{ focusMode: "single-shot" }] });
+          }
+          if (caps.focusMode.includes("continuous")) {
+            await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+          }
+        }
+      } catch (e) {}
+    }
+
     async function startScanner() {
       if (isScanning) return;
+      ensureAudioContext();
       try {
         if (!window.ZXing || !window.ZXing.BrowserMultiFormatReader) {
           showBanner("warn", "Camera barcode library could not load (check internet/HTTPS). You can still enter serial numbers manually.");
@@ -314,16 +393,30 @@
         if (!codeReader) {
           codeReader = new window.ZXing.BrowserMultiFormatReader();
         }
-        const videoEl = document.getElementById("videoPreview");
-        videoEl.style.display = "block";
+        document.getElementById("camWrapper").style.display = "block";
         document.getElementById("btnStartCam").style.display = "none";
         document.getElementById("btnStopCam").style.display = "inline-block";
         isScanning = true;
 
+        const constraints = {
+          audio: false,
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            focusMode: { ideal: "continuous" }
+          }
+        };
+
         await codeReader.decodeFromConstraints(
-          { video: { facingMode: { ideal: "environment" } } },
+          constraints,
           "videoPreview",
           (result, err) => {
+            const videoEl = document.getElementById("videoPreview");
+            if (videoEl && videoEl.srcObject && videoEl.srcObject !== activeStream) {
+              activeStream = videoEl.srcObject;
+              applyFocusConstraints(activeStream);
+            }
             if (result && isScanning) {
               const text = result.getText();
               const now = Date.now();
@@ -336,7 +429,7 @@
         );
       } catch (err) {
         isScanning = false;
-        document.getElementById("videoPreview").style.display = "none";
+        document.getElementById("camWrapper").style.display = "none";
         document.getElementById("btnStartCam").style.display = "inline-block";
         document.getElementById("btnStopCam").style.display = "none";
         showBanner("warn", `Camera access failed (${err.message || err}). Ensure HTTPS/camera permission is allowed, or use manual entry below.`);
@@ -345,10 +438,11 @@
 
     function stopScanner() {
       isScanning = false;
+      activeStream = null;
       if (codeReader) {
         try { codeReader.reset(); } catch (e) {}
       }
-      document.getElementById("videoPreview").style.display = "none";
+      document.getElementById("camWrapper").style.display = "none";
       document.getElementById("btnStartCam").style.display = "inline-block";
       document.getElementById("btnStopCam").style.display = "none";
     }
@@ -360,7 +454,6 @@
       document.getElementById("statRemaining").textContent = TOTAL_COUNT - redeemedCount;
       document.getElementById("statTotal").textContent = TOTAL_COUNT;
 
-      // Show redeemed items first, then unredeemed
       const ordered = [...list.filter(x => x.redeemed).reverse(), ...list.filter(x => !x.redeemed)];
       const tbody = document.getElementById("voucherTableBody");
       tbody.innerHTML = ordered.map(item => `
