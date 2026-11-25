@@ -282,8 +282,8 @@
           </div>
         </div>
         <div class="cam-controls">
-          <button type="button" class="btn-tool active" id="zoom1x" onclick="setZoomLevel(1)">1x</button>
-          <button type="button" class="btn-tool" id="zoom15x" onclick="setZoomLevel(1.5)">1.5x</button>
+          <button type="button" class="btn-tool" id="zoom1x" onclick="setZoomLevel(1)">1x</button>
+          <button type="button" class="btn-tool active" id="zoom15x" onclick="setZoomLevel(1.5)">1.5x</button>
           <button type="button" class="btn-tool" id="zoom2x" onclick="setZoomLevel(2)">2x</button>
           <button type="button" class="btn-tool" id="btnTorch" onclick="toggleTorch()">🔦 Light</button>
         </div>
@@ -361,7 +361,7 @@
     let isScanning = false;
     let activeStream = null;
     let torchOn = false;
-    let currentZoom = 1;
+    let currentZoom = 1.5;
     let audioCtx = null;
     let audioMaster = null;
     let lastScannedCode = "";
@@ -614,17 +614,10 @@
       const hints = new Map();
       if (window.ZXing && window.ZXing.DecodeHintType && window.ZXing.BarcodeFormat) {
         hints.set(window.ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-          window.ZXing.BarcodeFormat.CODE_128,
-          window.ZXing.BarcodeFormat.CODE_39,
-          window.ZXing.BarcodeFormat.EAN_13,
-          window.ZXing.BarcodeFormat.EAN_8,
-          window.ZXing.BarcodeFormat.UPC_A,
-          window.ZXing.BarcodeFormat.ITF,
-          window.ZXing.BarcodeFormat.QR_CODE
+          window.ZXing.BarcodeFormat.CODE_128
         ]);
-        hints.set(window.ZXing.DecodeHintType.TRY_HARDER, true);
       }
-      return new window.ZXing.BrowserMultiFormatReader(hints, 120);
+      return new window.ZXing.BrowserMultiFormatReader(hints, 80);
     }
 
     async function applyFocusConstraints(stream) {
@@ -700,14 +693,56 @@
       }
     }
 
+    let nativeDetector = null;
+    let nativeScanTimer = null;
+    let isNativeBusy = false;
     let assistReader = null;
     let rotateScanCanvas = null;
     let rotateScanCtx = null;
     let rotateScanTimer = null;
     let isAssistBusy = false;
 
+    function initNativeDetector() {
+      try {
+        if ("BarcodeDetector" in window) {
+          nativeDetector = new window.BarcodeDetector({ formats: ["code_128"] });
+        }
+      } catch (e) {
+        nativeDetector = null;
+      }
+    }
+
+    function handleDetectedText(text) {
+      if (!text || !isScanning) return;
+      const now = Date.now();
+      if (text === lastScannedCode && now - lastScanTime < 1200) return;
+      lastScannedCode = text;
+      lastScanTime = now;
+      processSerial(text);
+    }
+
     function startRotatedAssistLoop() {
       stopRotatedAssistLoop();
+      initNativeDetector();
+
+      if (nativeDetector) {
+        nativeScanTimer = setInterval(async () => {
+          if (!isScanning || isNativeBusy) return;
+          const videoEl = document.getElementById("videoPreview");
+          if (!videoEl || videoEl.readyState < 2 || !videoEl.videoWidth) return;
+          isNativeBusy = true;
+          try {
+            const barcodes = await nativeDetector.detect(videoEl);
+            if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
+              handleDetectedText(barcodes[0].rawValue);
+            }
+          } catch (e) {
+          } finally {
+            isNativeBusy = false;
+          }
+        }, 120);
+      }
+
       if (!assistReader) {
         assistReader = createCode128Reader();
       }
@@ -715,7 +750,7 @@
         rotateScanCanvas = document.createElement("canvas");
         rotateScanCtx = rotateScanCanvas.getContext("2d", { willReadFrequently: true });
       }
-      const angles = [90, -90, 0];
+      const angles = [90, -90];
       let angleIdx = 0;
 
       rotateScanTimer = setInterval(async () => {
@@ -730,18 +765,13 @@
         try {
           const vw = videoEl.videoWidth;
           const vh = videoEl.videoHeight;
-          const cropW = Math.floor(vw * 0.85);
-          const cropH = Math.floor(vh * 0.85);
+          const cropW = Math.floor(vw * 0.78);
+          const cropH = Math.floor(vh * 0.65);
           const sx = Math.floor((vw - cropW) / 2);
           const sy = Math.floor((vh - cropH) / 2);
 
-          if (angle === 90 || angle === -90) {
-            rotateScanCanvas.width = cropH;
-            rotateScanCanvas.height = cropW;
-          } else {
-            rotateScanCanvas.width = cropW;
-            rotateScanCanvas.height = cropH;
-          }
+          rotateScanCanvas.width = cropH;
+          rotateScanCanvas.height = cropW;
 
           rotateScanCtx.save();
           rotateScanCtx.translate(rotateScanCanvas.width / 2, rotateScanCanvas.height / 2);
@@ -749,25 +779,24 @@
           rotateScanCtx.drawImage(videoEl, sx, sy, cropW, cropH, -cropW / 2, -cropH / 2, cropW, cropH);
           rotateScanCtx.restore();
 
-          const dataUrl = rotateScanCanvas.toDataURL("image/jpeg", 0.78);
+          const dataUrl = rotateScanCanvas.toDataURL("image/jpeg", 0.75);
           const res = await assistReader.decodeFromImageUrl(dataUrl);
           if (res && isScanning) {
-            const text = res.getText();
-            const now = Date.now();
-            if (text === lastScannedCode && now - lastScanTime < 2200) return;
-            lastScannedCode = text;
-            lastScanTime = now;
-            processSerial(text);
+            handleDetectedText(res.getText());
           }
         } catch (e) {
-          // Ignore per-frame decode misses
         } finally {
           isAssistBusy = false;
         }
-      }, 320);
+      }, 650);
     }
 
     function stopRotatedAssistLoop() {
+      if (nativeScanTimer) {
+        clearInterval(nativeScanTimer);
+        nativeScanTimer = null;
+      }
+      isNativeBusy = false;
       if (rotateScanTimer) {
         clearInterval(rotateScanTimer);
         rotateScanTimer = null;
@@ -854,12 +883,7 @@
 
         await codeReader.decodeFromStream(stream, videoEl, (result) => {
           if (result && isScanning) {
-            const text = result.getText();
-            const now = Date.now();
-            if (text === lastScannedCode && now - lastScanTime < 2200) return;
-            lastScannedCode = text;
-            lastScanTime = now;
-            processSerial(text);
+            handleDetectedText(result.getText());
           }
         });
 
