@@ -700,12 +700,17 @@
       }
     }
 
+    let assistReader = null;
     let rotateScanCanvas = null;
     let rotateScanCtx = null;
     let rotateScanTimer = null;
+    let isAssistBusy = false;
 
     function startRotatedAssistLoop() {
       stopRotatedAssistLoop();
+      if (!assistReader) {
+        assistReader = createCode128Reader();
+      }
       if (!rotateScanCanvas) {
         rotateScanCanvas = document.createElement("canvas");
         rotateScanCtx = rotateScanCanvas.getContext("2d", { willReadFrequently: true });
@@ -714,10 +719,11 @@
       let angleIdx = 0;
 
       rotateScanTimer = setInterval(async () => {
-        if (!isScanning || !codeReader) return;
+        if (!isScanning || !assistReader || isAssistBusy) return;
         const videoEl = document.getElementById("videoPreview");
         if (!videoEl || videoEl.readyState < 2 || !videoEl.videoWidth || !videoEl.videoHeight) return;
 
+        isAssistBusy = true;
         const angle = angles[angleIdx % angles.length];
         angleIdx++;
 
@@ -744,7 +750,7 @@
           rotateScanCtx.restore();
 
           const dataUrl = rotateScanCanvas.toDataURL("image/jpeg", 0.78);
-          const res = await codeReader.decodeFromImageUrl(dataUrl);
+          const res = await assistReader.decodeFromImageUrl(dataUrl);
           if (res && isScanning) {
             const text = res.getText();
             const now = Date.now();
@@ -755,8 +761,10 @@
           }
         } catch (e) {
           // Ignore per-frame decode misses
+        } finally {
+          isAssistBusy = false;
         }
-      }, 260);
+      }, 320);
     }
 
     function stopRotatedAssistLoop() {
@@ -764,6 +772,46 @@
         clearInterval(rotateScanTimer);
         rotateScanTimer = null;
       }
+      isAssistBusy = false;
+      if (assistReader) {
+        try { assistReader.reset(); } catch (e) {}
+      }
+    }
+
+    async function openCameraStream() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("Camera API not available in this browser");
+      }
+      const attempts = [
+        {
+          audio: false,
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          }
+        },
+        {
+          audio: false,
+          video: {
+            facingMode: "environment"
+          }
+        },
+        {
+          audio: false,
+          video: true
+        }
+      ];
+
+      let lastErr = null;
+      for (const constraints of attempts) {
+        try {
+          return await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+      throw lastErr || new Error("Unable to open camera");
     }
 
     async function startScanner() {
@@ -774,47 +822,51 @@
           showBanner("warn", "Camera barcode library could not load. Use manual entry below.");
           return;
         }
-        if (!codeReader) codeReader = createCode128Reader();
+
+        if (codeReader) {
+          try { codeReader.reset(); } catch (e) {}
+        }
+        codeReader = createCode128Reader();
+
         document.getElementById("camWrapper").style.display = "block";
         document.getElementById("btnStartCam").style.display = "none";
         document.getElementById("btnStopCam").style.display = "inline-block";
         isScanning = true;
 
-        startRotatedAssistLoop();
-        await codeReader.decodeFromConstraints(
-          {
-            audio: false,
-            video: {
-              facingMode: { ideal: "environment" },
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
-              focusMode: { ideal: "continuous" }
-            }
-          },
-          "videoPreview",
-          (result) => {
-            const videoEl = document.getElementById("videoPreview");
-            if (videoEl && videoEl.srcObject && videoEl.srcObject !== activeStream) {
-              activeStream = videoEl.srcObject;
-              applyFocusConstraints(activeStream);
-              if (currentZoom !== 1) setZoomLevel(currentZoom);
-            }
-            if (result && isScanning) {
-              const text = result.getText();
-              const now = Date.now();
-              if (text === lastScannedCode && now - lastScanTime < 2200) return;
-              lastScannedCode = text;
-              lastScanTime = now;
-              processSerial(text);
-            }
+        const stream = await openCameraStream();
+        if (!isScanning) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        activeStream = stream;
+
+        const videoEl = document.getElementById("videoPreview");
+        videoEl.srcObject = stream;
+        videoEl.setAttribute("playsinline", "true");
+        videoEl.setAttribute("webkit-playsinline", "true");
+        videoEl.muted = true;
+        await videoEl.play();
+
+        await applyFocusConstraints(activeStream);
+        if (currentZoom !== 1) {
+          await setZoomLevel(currentZoom);
+        }
+
+        await codeReader.decodeFromStream(stream, videoEl, (result) => {
+          if (result && isScanning) {
+            const text = result.getText();
+            const now = Date.now();
+            if (text === lastScannedCode && now - lastScanTime < 2200) return;
+            lastScannedCode = text;
+            lastScanTime = now;
+            processSerial(text);
           }
-        );
+        });
+
+        startRotatedAssistLoop();
       } catch (err) {
-        isScanning = false;
-        document.getElementById("camWrapper").style.display = "none";
-        document.getElementById("btnStartCam").style.display = "inline-block";
-        document.getElementById("btnStopCam").style.display = "none";
-        showBanner("warn", `Camera access failed (${err.message || err}). Ensure HTTPS/camera permission is allowed.`);
+        stopScanner();
+        showBanner("warn", `Camera error: ${err.message || err}. Please check camera permission or try refreshing.`);
       }
     }
 
@@ -825,7 +877,16 @@
       const torchBtn = document.getElementById("btnTorch");
       if (torchBtn) torchBtn.classList.remove("active");
       const videoEl = document.getElementById("videoPreview");
-      if (videoEl) videoEl.style.transform = "none";
+      if (videoEl) {
+        videoEl.style.transform = "none";
+        try { videoEl.pause(); } catch (e) {}
+        videoEl.srcObject = null;
+      }
+      if (activeStream && activeStream.getTracks) {
+        activeStream.getTracks().forEach((track) => {
+          try { track.stop(); } catch (e) {}
+        });
+      }
       activeStream = null;
       if (codeReader) {
         try { codeReader.reset(); } catch (e) {}
