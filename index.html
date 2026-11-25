@@ -130,8 +130,8 @@
     }
     .scan-frame {
       position: relative;
-      width: 34%;
-      height: 82%;
+      width: 82%;
+      height: 42%;
       border: 2px solid rgba(255, 255, 255, 0.9);
       border-radius: 8px;
       box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
@@ -287,7 +287,7 @@
           <button type="button" class="btn-tool" id="zoom2x" onclick="setZoomLevel(2)">2x</button>
           <button type="button" class="btn-tool" id="btnTorch" onclick="toggleTorch()">🔦 Light</button>
         </div>
-        <div class="focus-tip">Hold barcode vertically across the red line ~15–22 cm away · Tap video to refocus</div>
+        <div class="focus-tip">Hold phone normally · Align horizontal barcode inside frame ~15–22 cm away · Tap video to refocus</div>
       </div>
 
       <div class="note-row">
@@ -700,6 +700,72 @@
       }
     }
 
+    let rotateScanCanvas = null;
+    let rotateScanCtx = null;
+    let rotateScanTimer = null;
+
+    function startRotatedAssistLoop() {
+      stopRotatedAssistLoop();
+      if (!rotateScanCanvas) {
+        rotateScanCanvas = document.createElement("canvas");
+        rotateScanCtx = rotateScanCanvas.getContext("2d", { willReadFrequently: true });
+      }
+      const angles = [90, -90, 0];
+      let angleIdx = 0;
+
+      rotateScanTimer = setInterval(async () => {
+        if (!isScanning || !codeReader) return;
+        const videoEl = document.getElementById("videoPreview");
+        if (!videoEl || videoEl.readyState < 2 || !videoEl.videoWidth || !videoEl.videoHeight) return;
+
+        const angle = angles[angleIdx % angles.length];
+        angleIdx++;
+
+        try {
+          const vw = videoEl.videoWidth;
+          const vh = videoEl.videoHeight;
+          const cropW = Math.floor(vw * 0.85);
+          const cropH = Math.floor(vh * 0.85);
+          const sx = Math.floor((vw - cropW) / 2);
+          const sy = Math.floor((vh - cropH) / 2);
+
+          if (angle === 90 || angle === -90) {
+            rotateScanCanvas.width = cropH;
+            rotateScanCanvas.height = cropW;
+          } else {
+            rotateScanCanvas.width = cropW;
+            rotateScanCanvas.height = cropH;
+          }
+
+          rotateScanCtx.save();
+          rotateScanCtx.translate(rotateScanCanvas.width / 2, rotateScanCanvas.height / 2);
+          rotateScanCtx.rotate((angle * Math.PI) / 180);
+          rotateScanCtx.drawImage(videoEl, sx, sy, cropW, cropH, -cropW / 2, -cropH / 2, cropW, cropH);
+          rotateScanCtx.restore();
+
+          const dataUrl = rotateScanCanvas.toDataURL("image/jpeg", 0.78);
+          const res = await codeReader.decodeFromImageUrl(dataUrl);
+          if (res && isScanning) {
+            const text = res.getText();
+            const now = Date.now();
+            if (text === lastScannedCode && now - lastScanTime < 2200) return;
+            lastScannedCode = text;
+            lastScanTime = now;
+            processSerial(text);
+          }
+        } catch (e) {
+          // Ignore per-frame decode misses
+        }
+      }, 260);
+    }
+
+    function stopRotatedAssistLoop() {
+      if (rotateScanTimer) {
+        clearInterval(rotateScanTimer);
+        rotateScanTimer = null;
+      }
+    }
+
     async function startScanner() {
       if (isScanning) return;
       ensureAudioContext();
@@ -714,6 +780,7 @@
         document.getElementById("btnStopCam").style.display = "inline-block";
         isScanning = true;
 
+        startRotatedAssistLoop();
         await codeReader.decodeFromConstraints(
           {
             audio: false,
@@ -753,6 +820,7 @@
 
     function stopScanner() {
       isScanning = false;
+      stopRotatedAssistLoop();
       torchOn = false;
       const torchBtn = document.getElementById("btnTorch");
       if (torchBtn) torchBtn.classList.remove("active");
