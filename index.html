@@ -90,6 +90,19 @@
     .btn-danger { background: #DC2626; color: #fff; }
     .btn-success { background: #15803D; color: #fff; }
     .btn-outline { background: #E2E8F0; color: var(--text); }
+    .btn-tool {
+      background: #F1F5F9;
+      color: var(--text);
+      border: 1px solid #CBD5E1;
+      padding: 6px 10px;
+      font-size: 12px;
+      border-radius: 7px;
+    }
+    .btn-tool.active {
+      background: var(--navy);
+      color: #fff;
+      border-color: var(--navy);
+    }
     .cam-wrapper {
       position: relative;
       margin-top: 10px;
@@ -97,11 +110,47 @@
     }
     video {
       width: 100%;
-      max-height: 280px;
+      max-height: 300px;
       border-radius: 10px;
       background: #000;
       display: block;
       object-fit: cover;
+    }
+    .scan-overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .scan-frame {
+      position: relative;
+      width: 36%;
+      height: 78%;
+      border: 2px solid rgba(255, 255, 255, 0.88);
+      border-radius: 8px;
+      box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
+    }
+    .scan-red-line {
+      position: absolute;
+      top: 50%;
+      left: 6%;
+      right: 6%;
+      height: 2.5px;
+      background: #EF4444;
+      box-shadow: 0 0 8px rgba(239, 68, 68, 0.95);
+      transform: translateY(-50%);
+    }
+    .cam-controls {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: center;
+      margin-top: 8px;
     }
     .focus-tip {
       margin-top: 6px;
@@ -223,7 +272,18 @@
 
       <div class="cam-wrapper" id="camWrapper" onclick="triggerRefocus()">
         <video id="videoPreview" playsinline muted></video>
-        <div class="focus-tip">Hold barcode ~12–18 cm away · Tap camera view to refocus</div>
+        <div class="scan-overlay">
+          <div class="scan-frame">
+            <div class="scan-red-line"></div>
+          </div>
+        </div>
+        <div class="cam-controls" onclick="event.stopPropagation()">
+          <button type="button" class="btn-tool active" id="zoom1x" onclick="setZoomLevel(1)">1x</button>
+          <button type="button" class="btn-tool" id="zoom15x" onclick="setZoomLevel(1.5)">1.5x</button>
+          <button type="button" class="btn-tool" id="zoom2x" onclick="setZoomLevel(2)">2x</button>
+          <button type="button" class="btn-tool" id="btnTorch" onclick="toggleTorch()">🔦 Light</button>
+        </div>
+        <div class="focus-tip">Align vertical barcode inside frame ~15–22 cm away · Tap video to refocus</div>
       </div>
 
       <div class="note-row">
@@ -296,6 +356,8 @@
     let codeReader = null;
     let isScanning = false;
     let activeStream = null;
+    let torchOn = false;
+    let currentZoom = 1;
     let audioCtx = null;
     let audioMaster = null;
     let lastScannedCode = "";
@@ -544,6 +606,15 @@
       processSerial(document.getElementById("serialInput").value);
     }
 
+    function createCode128Reader() {
+      const hints = new Map();
+      if (window.ZXing && window.ZXing.DecodeHintType && window.ZXing.BarcodeFormat) {
+        hints.set(window.ZXing.DecodeHintType.POSSIBLE_FORMATS, [window.ZXing.BarcodeFormat.CODE_128]);
+        hints.set(window.ZXing.DecodeHintType.TRY_HARDER, true);
+      }
+      return new window.ZXing.BrowserMultiFormatReader(hints);
+    }
+
     async function applyFocusConstraints(stream) {
       try {
         const track = stream && stream.getVideoTracks && stream.getVideoTracks()[0];
@@ -573,6 +644,50 @@
       } catch (e) {}
     }
 
+    async function setZoomLevel(zoomVal) {
+      currentZoom = zoomVal;
+      ["zoom1x", "zoom15x", "zoom2x"].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.classList.remove("active");
+      });
+      const activeId = zoomVal === 1 ? "zoom1x" : (zoomVal === 1.5 ? "zoom15x" : "zoom2x");
+      const activeBtn = document.getElementById(activeId);
+      if (activeBtn) activeBtn.classList.add("active");
+
+      const videoEl = document.getElementById("videoPreview");
+      try {
+        const track = activeStream && activeStream.getVideoTracks && activeStream.getVideoTracks()[0];
+        const caps = track && track.getCapabilities ? track.getCapabilities() : {};
+        if (track && track.applyConstraints && caps.zoom) {
+          const clamped = Math.max(caps.zoom.min || 1, Math.min(caps.zoom.max || zoomVal, zoomVal));
+          await track.applyConstraints({ advanced: [{ zoom: clamped }] });
+          if (videoEl) videoEl.style.transform = "none";
+          return;
+        }
+      } catch (e) {}
+      if (videoEl) {
+        videoEl.style.transform = zoomVal > 1 ? `scale(${zoomVal})` : "none";
+        videoEl.style.transformOrigin = "center center";
+      }
+    }
+
+    async function toggleTorch() {
+      try {
+        const track = activeStream && activeStream.getVideoTracks && activeStream.getVideoTracks()[0];
+        const caps = track && track.getCapabilities ? track.getCapabilities() : {};
+        if (!track || !track.applyConstraints || !caps.torch) {
+          showBanner("warn", "Flashlight not supported on this device/browser.");
+          return;
+        }
+        torchOn = !torchOn;
+        await track.applyConstraints({ advanced: [{ torch: torchOn }] });
+        const btn = document.getElementById("btnTorch");
+        if (btn) btn.classList.toggle("active", torchOn);
+      } catch (e) {
+        showBanner("warn", "Unable to toggle flashlight.");
+      }
+    }
+
     async function startScanner() {
       if (isScanning) return;
       ensureAudioContext();
@@ -581,7 +696,7 @@
           showBanner("warn", "Camera barcode library could not load. Use manual entry below.");
           return;
         }
-        if (!codeReader) codeReader = new window.ZXing.BrowserMultiFormatReader();
+        if (!codeReader) codeReader = createCode128Reader();
         document.getElementById("camWrapper").style.display = "block";
         document.getElementById("btnStartCam").style.display = "none";
         document.getElementById("btnStopCam").style.display = "inline-block";
@@ -592,8 +707,8 @@
             audio: false,
             video: {
               facingMode: { ideal: "environment" },
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
               focusMode: { ideal: "continuous" }
             }
           },
@@ -603,6 +718,7 @@
             if (videoEl && videoEl.srcObject && videoEl.srcObject !== activeStream) {
               activeStream = videoEl.srcObject;
               applyFocusConstraints(activeStream);
+              if (currentZoom !== 1) setZoomLevel(currentZoom);
             }
             if (result && isScanning) {
               const text = result.getText();
@@ -625,6 +741,11 @@
 
     function stopScanner() {
       isScanning = false;
+      torchOn = false;
+      const torchBtn = document.getElementById("btnTorch");
+      if (torchBtn) torchBtn.classList.remove("active");
+      const videoEl = document.getElementById("videoPreview");
+      if (videoEl) videoEl.style.transform = "none";
       activeStream = null;
       if (codeReader) {
         try { codeReader.reset(); } catch (e) {}
