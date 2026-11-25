@@ -613,10 +613,18 @@
     function createCode128Reader() {
       const hints = new Map();
       if (window.ZXing && window.ZXing.DecodeHintType && window.ZXing.BarcodeFormat) {
-        hints.set(window.ZXing.DecodeHintType.POSSIBLE_FORMATS, [window.ZXing.BarcodeFormat.CODE_128]);
+        hints.set(window.ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+          window.ZXing.BarcodeFormat.CODE_128,
+          window.ZXing.BarcodeFormat.CODE_39,
+          window.ZXing.BarcodeFormat.EAN_13,
+          window.ZXing.BarcodeFormat.EAN_8,
+          window.ZXing.BarcodeFormat.UPC_A,
+          window.ZXing.BarcodeFormat.ITF,
+          window.ZXing.BarcodeFormat.QR_CODE
+        ]);
         hints.set(window.ZXing.DecodeHintType.TRY_HARDER, true);
       }
-      return new window.ZXing.BrowserMultiFormatReader(hints);
+      return new window.ZXing.BrowserMultiFormatReader(hints, 120);
     }
 
     async function applyFocusConstraints(stream) {
@@ -711,8 +719,8 @@
             audio: false,
             video: {
               facingMode: { ideal: "environment" },
-              width: { ideal: 1920 },
-              height: { ideal: 1080 },
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
               focusMode: { ideal: "continuous" }
             }
           },
